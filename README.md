@@ -1,6 +1,6 @@
 # Corp.Lib.Logging
 
-A standardized, enterprise-grade logging library for .NET 10 applications built on top of [Serilog](https://serilog.net/). This library provides rich structured logging with automatic sensitive data masking, correlation ID tracking, and multiple output sinks configured out of the box.
+A standardized, enterprise-grade logging library for .NET Standard 2.0 built on top of [Serilog](https://serilog.net/). This library provides rich structured logging with automatic sensitive data masking, correlation ID tracking, and multiple output sinks configured out of the box. Targeting .NET Standard 2.0 enables compatibility across .NET Core 2.0+, .NET 5+, and .NET Framework 4.6.1+.
 
 ## Table of Contents
 
@@ -97,10 +97,10 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
 
 // Add logging (false = no session support for APIs)
-builder.AddLogging(enableSession: false);
+builder.Services.AddLogging(enableSession: false);
 
 // Add Swagger with correlation ID header
-builder.AddSwaggerWithLogging();
+builder.Services.AddSwaggerWithLogging();
 
 var app = builder.Build();
 
@@ -125,10 +125,10 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllersWithViews();
 
 // Add logging with session support for correlation ID tracking
-builder.AddLogging(enableSession: true);
+builder.Services.AddLogging(enableSession: true);
 
 // Add Swagger with correlation ID header (optional)
-builder.AddSwaggerWithLogging();
+builder.Services.AddSwaggerWithLogging();
 
 var app = builder.Build();
 
@@ -394,18 +394,18 @@ public override async Task StopAsync(CancellationToken cancellationToken)
 
 **Namespace:** `Corp.Lib.Logging.Extensions`
 
-The `ServiceCollectionExtensions` class provides extension methods for `WebApplicationBuilder` and `WebApplication` to simplify logging configuration in ASP.NET Core applications.
+The `ServiceCollectionExtensions` class provides extension methods for `IServiceCollection` and `IApplicationBuilder` to simplify logging configuration in ASP.NET Core applications.
 
 ```csharp
 using Corp.Lib.Logging.Extensions;
 ```
 
-#### WebApplicationBuilder Extensions
+#### IServiceCollection Extensions
 
-##### `AddLogging(bool enableSession)`
+##### `AddLogging(this IServiceCollection services, bool enableSession)`
 
 ```csharp
-public void AddLogging(bool enableSession)
+public static IServiceCollection AddLogging(this IServiceCollection services, bool enableSession)
 ```
 
 Configures logging services for the application. Call this method in your `Program.cs` during service configuration.
@@ -414,6 +414,7 @@ Configures logging services for the application. Call this method in your `Progr
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
+| `services` | `IServiceCollection` | The service collection to add logging services to. |
 | `enableSession` | `bool` | Set to `true` to enable session-based correlation ID tracking. Use `true` for web applications (MVC/Razor Pages) and `false` for APIs. |
 
 **What it configures:**
@@ -428,10 +429,10 @@ Configures logging services for the application. Call this method in your `Progr
 var builder = WebApplication.CreateBuilder(args);
 
 // For APIs - no session needed
-builder.AddLogging(enableSession: false);
+builder.Services.AddLogging(enableSession: false);
 
 // For web applications - session enables correlation ID persistence
-builder.AddLogging(enableSession: true);
+builder.Services.AddLogging(enableSession: true);
 ```
 
 **Session Configuration:**
@@ -444,13 +445,19 @@ When `enableSession` is `true`, the session is configured with:
 
 ---
 
-##### `AddSwaggerWithLogging()`
+##### `AddSwaggerWithLogging(this IServiceCollection services)`
 
 ```csharp
-public void AddSwaggerWithLogging()
+public static IServiceCollection AddSwaggerWithLogging(this IServiceCollection services)
 ```
 
 Configures Swagger/OpenAPI with automatic correlation ID header support. Every API endpoint in Swagger UI will include a required `X-Correlation-Id` header field.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `services` | `IServiceCollection` | The service collection to add Swagger services to. |
 
 **What it configures:**
 - API explorer services
@@ -462,20 +469,20 @@ Configures Swagger/OpenAPI with automatic correlation ID header support. Every A
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
 
-builder.AddLogging(enableSession: false);
-builder.AddSwaggerWithLogging();  // Add after AddLogging
+builder.Services.AddLogging(enableSession: false);
+builder.Services.AddSwaggerWithLogging();  // Add after AddLogging
 
 var app = builder.Build();
 ```
 
 ---
 
-#### WebApplication Extensions
+#### IApplicationBuilder Extensions
 
-##### `UseLogging(bool useSession)`
+##### `UseLogging(this IApplicationBuilder app, bool useSession)`
 
 ```csharp
-public void UseLogging(bool useSession)
+public static IApplicationBuilder UseLogging(this IApplicationBuilder app, bool useSession)
 ```
 
 Enables logging middleware for the application. Call this method in your `Program.cs` during middleware configuration.
@@ -484,6 +491,7 @@ Enables logging middleware for the application. Call this method in your `Progra
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
+| `app` | `IApplicationBuilder` | The application builder to add logging middleware to. |
 | `useSession` | `bool` | Set to `true` if session was enabled in `AddLogging()`. Must match the value used in `AddLogging()`. |
 
 **What it enables:**
@@ -512,13 +520,19 @@ app.MapControllers();
 
 ---
 
-##### `UseSwaggerWithLogging()`
+##### `UseSwaggerWithLogging(this IApplicationBuilder app)`
 
 ```csharp
-public void UseSwaggerWithLogging()
+public static IApplicationBuilder UseSwaggerWithLogging(this IApplicationBuilder app)
 ```
 
 Enables Swagger UI with correlation ID header support.
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `app` | `IApplicationBuilder` | The application builder to enable Swagger middleware on. |
 
 **Usage:**
 
@@ -1087,7 +1101,7 @@ client.DefaultRequestHeaders.Add("X-Correlation-Id", Logger.CorrelationId.ToStri
 
 ### Missing Correlation IDs
 
-1. For web apps: Ensure `AddLogging(true)` and `UseLogging(true)` are called
+1. For web apps: Ensure `builder.Services.AddLogging(true)` and `app.UseLogging(true)` are called
 2. For APIs: Ensure the `X-Correlation-Id` header is being sent by clients
 3. For worker services: Set `CorrelationId` in `LoggerSettings`
 4. Check that `UseLogging()` is called before other middleware that might need correlation IDs
@@ -1131,23 +1145,31 @@ This package depends on the following NuGet packages:
 
 | Package | Version | Purpose |
 |---------|---------|---------|
+| Masking.Serilog | 1.0.13+ | Property name-based masking |
+| Microsoft.AspNetCore.Http | 2.2.0+ | HTTP context and accessor types |
+| Microsoft.AspNetCore.Session | 2.2.0+ | Session middleware support |
+| Microsoft.Extensions.Caching.Memory | 8.0.1+ | Distributed memory cache |
+| Microsoft.Extensions.Hosting.Abstractions | 8.0.1+ | Application lifetime management |
 | Serilog | 4.3.0+ | Core structured logging |
-| Serilog.AspNetCore | 10.0.0+ | ASP.NET Core integration |
+| Serilog.AspNetCore | 7.0.0+ | ASP.NET Core integration |
 | Serilog.Enrichers.Environment | 3.0.1+ | Machine name and username enrichment |
 | Serilog.Enrichers.Sensitive | 2.1.0+ | Pattern-based sensitive data masking |
 | Serilog.Exceptions | 8.4.0+ | Detailed exception logging |
 | Serilog.Expressions | 5.0.0+ | Log output formatting templates |
+| Serilog.Formatting.Compact | 3.0.0+ | Compact JSON formatting |
 | Serilog.Sinks.Async | 2.1.0+ | Asynchronous log writing |
 | Serilog.Sinks.Console | 6.1.1+ | Console output (DEBUG builds) |
 | Serilog.Sinks.File | 7.0.0+ | File output with rolling |
-| Masking.Serilog | 1.0.13+ | Property name-based masking |
-| Swashbuckle.AspNetCore | 10.1.0+ | Swagger/OpenAPI integration |
+| Swashbuckle.AspNetCore | 6.9.0+ | Swagger/OpenAPI integration |
+| System.Configuration.ConfigurationManager | 8.0.1+ | Configuration file support |
+| System.Text.Json | 8.0.5+ | JSON serialization |
 
 ---
 
 ## Version History
 
-- **10.0.1** - Current version targeting .NET 10
+- **10.0.8** - Retargeted to .NET Standard 2.0 for broad compatibility across .NET Core 2.0+, .NET 5+, and .NET Framework 4.6.1+. Extension methods now use `IServiceCollection` and `IApplicationBuilder` instead of `WebApplicationBuilder` and `WebApplication`.
+- **10.0.1** - Initial release targeting .NET 10
 
 ---
 
