@@ -31,7 +31,7 @@ A standardized, enterprise-grade logging library for .NET 10 applications built 
 - **Session Support** - Optional session-based correlation ID management for web applications
 - **Swagger Integration** - Automatic correlation ID header in Swagger UI
 - **Automatic Request Logging** - Optional HTTP request/response logging via Serilog middleware
-- **Enriched Log Entries** - Automatic enrichment with machine name, environment username, Windows username, and exception details
+- **Enriched Log Entries** - Machine name, environment username, exception details, Windows username when HTTP context and user identity are available, correlation ID and per-entry IDs when the enrichers apply
 - **Binary Data Protection** - Automatic transformation of binary data to prevent log bloat
 - **Async File Writing** - Non-blocking log writes for better application performance
 - **HTTP Client Integration** - Built-in `DelegatingHandler` for automatic correlation ID propagation in HTTP calls
@@ -152,12 +152,14 @@ app.Run();
 ```csharp
 using Corp.Lib.Logging;
 
-// Use the static Logger directly - no setup required
+// Use the static Logger directly � configuration is read from appsettings.json on first use
 Logger.Log.Information("Application starting...");
 
-// Don't forget to flush on shutdown
+// Flush on shutdown so async sinks finish writing
 Logger.CloseAndFlush();
 ```
+
+For worker or console processes there is no HTTP context. If you call `Logger.CorrelationId`, use a `CorrelationId` in `LoggerSettings`, and keep a `LoggerSettings` node in `appsettings.json` (see [Configuration Reference](#loggersettings-properties)). If you use only the `ApplicationName` fallback without a `LoggerSettings` section, avoid `Logger.CorrelationId` until that gap is addressed in your app.
 
 ### 3. Write Log Messages
 
@@ -279,11 +281,15 @@ public static Guid CorrelationId { get; }
 
 Gets the current correlation ID for the request context. This ID is automatically included in all log entries and can be used to trace requests across services.
 
-**Correlation ID Resolution Order:**
-1. HTTP header `X-Correlation-Id` (if present in the request)
-2. Session-stored correlation ID (if session is enabled)
-3. Configuration file `CorrelationId` setting (for worker services)
-4. `Guid.Empty` if no correlation ID is available
+**Correlation ID resolution (matches `CorrelationId.GetCorrelationId()`):**
+
+When an HTTP request is active:
+
+1. HTTP header `X-Correlation-Id` (if present and a valid GUID)
+2. `HttpContext.Items["X-Correlation-Id"]` (set by session middleware when session is enabled)
+3. `Guid.Empty` if neither is available (configured `LoggerSettings.CorrelationId` is **not** used in this path)
+
+When there is no HTTP context (e.g. worker/console), the code reads `LoggerSettings` from disk and returns `LoggerSettings.CorrelationId` if set, otherwise `Guid.Empty`. That path requires a `LoggerSettings` object in `appsettings.json`; otherwise configuration resolution throws.
 
 **Usage:**
 
@@ -401,10 +407,10 @@ using Corp.Lib.Logging.Extensions;
 
 #### WebApplicationBuilder Extensions
 
-##### `AddLogging(bool enableSession)`
+##### `AddLogging(bool enableSession, int sessionExpirationInMinutes = 60)`
 
 ```csharp
-public void AddLogging(bool enableSession)
+public void AddLogging(bool enableSession, int sessionExpirationInMinutes = 60)
 ```
 
 Configures logging services for the application. Call this method in your `Program.cs` during service configuration.
@@ -414,6 +420,7 @@ Configures logging services for the application. Call this method in your `Progr
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `enableSession` | `bool` | Set to `true` to enable session-based correlation ID tracking. Use `true` for web applications (MVC/Razor Pages) and `false` for APIs. |
+| `sessionExpirationInMinutes` | `int` | Session idle timeout when `enableSession` is `true`. Default is `60`. |
 
 **What it configures:**
 - `IHttpContextAccessor` for HTTP context access
@@ -433,13 +440,18 @@ builder.AddLogging(enableSession: false);
 builder.AddLogging(enableSession: true);
 ```
 
-**Session Configuration:**
-When `enableSession` is `true`, the session is configured with:
-- Cookie name: Constructed as `{TargetedVoyagerInstance}.{TargetedVoyagerEnvironment}.{LoggerSettings.Name}`
+**Session configuration:**
+
+When `enableSession` is `true`, the session cookie name is always `{TargetedVoyagerInstance}.{TargetedVoyagerEnvironment}.{applicationSegment}`, where `applicationSegment` is `LoggerSettings.Name` when a `LoggerSettings` section exists, otherwise the root `ApplicationName` value. This can differ from log file prefixes: file names use `Logger.Name`, which is only `LoggerSettings.Name` when that property is non-empty (see [Quick Start](#quick-start)).
+
+Other options:
+
 - Secure policy: `Always` (HTTPS only)
-- HTTP only: `true` (not accessible via JavaScript)
-- Essential: `true` (required for functionality)
-- Idle timeout: 60 minutes
+- HTTP only: `true`
+- Essential: `true`
+- Idle timeout: `sessionExpirationInMinutes` (default 60)
+
+`LoggerSettings.SessionIdleTime` is deserialized from JSON but is **not** read by `AddLogging`; use the method parameter for session timeout.
 
 ---
 
@@ -652,11 +664,10 @@ public Guid GetCorrelationId()
 
 Retrieves the current correlation ID from the available context.
 
-**Resolution Order:**
-1. **HTTP Header:** Checks for `X-Correlation-Id` header in the current HTTP request
-2. **HTTP Context Items:** Checks for correlation ID stored in `HttpContext.Items` (set by session middleware)
-3. **Configuration:** Falls back to `LoggerSettings.CorrelationId` from `appsettings.json` (useful for worker services)
-4. **Default:** Returns `Guid.Empty` if no correlation ID is available
+**Resolution order:**
+
+- **With HTTP context:** (1) `X-Correlation-Id` header if it parses as a GUID, (2) `HttpContext.Items["X-Correlation-Id"]` from session middleware, (3) `Guid.Empty`. Configured `LoggerSettings.CorrelationId` is not used on this path.
+- **Without HTTP context:** `LoggerSettings.CorrelationId` if present, else `Guid.Empty`. A `LoggerSettings` node must exist in `appsettings.json` for this branch.
 
 **Returns:** `Guid` - The current correlation ID or `Guid.Empty`
 
@@ -685,7 +696,7 @@ Enriches a log event with the correlation ID property. This method is called aut
 | `logEvent` | `LogEvent` | The log event to enrich |
 | `propertyFactory` | `ILogEventPropertyFactory` | Factory for creating log event properties |
 
-> **Note:** You typically don't need to call this method directly. It's automatically invoked by Serilog when the enricher is registered via `.Enrich.WithCorrelationId()`.
+> **Note:** You typically don't need to call this method directly. It's automatically invoked by Serilog when the enricher is registered via `.Enrich.WithCorrelationId()`. If `HttpContext` is unavailable, `Enrich` returns without adding a correlation property (unlike `GetCorrelationId()`, which still reads `LoggerSettings` when there is no HTTP context).
 
 ---
 
@@ -753,11 +764,12 @@ Add the `LoggerSettings` section to your `appsettings.json` for full control ove
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
-| `Name` | `string` | **Yes** | - | Application name used in log file names and log entries. Must not be empty. |
+| `Name` | `string` | No* | - | When non-empty, used as `Logger.Name` and log file prefix. When empty or omitted, the library builds the name from `TargetedVoyagerInstance`, `TargetedVoyagerEnvironment`, and root `ApplicationName` (same rules as the minimal configuration path). *You must supply either a non-empty `Name` or a valid `ApplicationName` fallback. |
 | `Level` | `string` | No | `"Information"` | Minimum log level: `Verbose`, `Debug`, `Information`, `Warning`, `Error`, `Fatal` |
 | `Path` | `string` | No | `"logs"` | Directory path where log files are written. Can be relative or absolute. |
-| `CorrelationId` | `Guid?` | No | `null` | Optional fixed correlation ID. Useful for batch jobs and worker services. |
+| `CorrelationId` | `Guid?` | No | `null` | Optional fixed correlation ID when there is no HTTP context (workers). Not applied when an HTTP request is being processed. |
 | `EnableAutomaticRequestLogging` | `bool` | No | `false` | Enable automatic HTTP request/response logging via Serilog middleware. |
+| `SessionIdleTime` | `int` | No | `60` | Present on `LoggerSettings` for deserialization only; session idle timeout is controlled by `AddLogging(..., sessionExpirationInMinutes)`. |
 
 ### Example Configurations
 
@@ -878,7 +890,7 @@ Each log entry is a JSON object with the following structure:
 | `Exception` | Exception details (only present when logging exceptions) |
 | `LogEntryId` | Unique identifier for each log entry |
 | `MachineName` | Server/machine name |
-| `WindowsUsername` | Windows identity username |
+| `WindowsUsername` | Windows identity username when available over HTTP; otherwise omitted or unset for that enricher |
 | `Properties` | Additional structured properties from the log message |
 
 ---
@@ -928,9 +940,9 @@ The correlation ID is a GUID that tracks a request across multiple services and 
 
 ### How It Works
 
-1. **Web Applications with Session**: The correlation ID is generated and stored in the session, then automatically propagated to all log entries
-2. **APIs**: The correlation ID is read from the `X-Correlation-Id` HTTP header
-3. **Worker Services**: Use the optional `CorrelationId` configuration setting for a fixed correlation ID
+1. **Web applications with session:** Middleware stores a GUID in session under `X-Correlation-Id` and copies it to `HttpContext.Items` for the enricher and `Logger.CorrelationId`.
+2. **APIs (no session):** Use the `X-Correlation-Id` header on each request, or correlation ID logs as `Guid.Empty` if omitted.
+3. **Workers / no HTTP context:** Set `LoggerSettings.CorrelationId` and keep a `LoggerSettings` section in `appsettings.json` when using correlation APIs.
 
 ### HTTP Header Name
 
@@ -1016,10 +1028,10 @@ public override async Task StopAsync(CancellationToken cancellationToken)
 ### 2. Use Structured Logging
 
 ```csharp
-// ? Good - structured logging preserves property types
+// Good � structured logging preserves property types
 Logger.Log.Information("Order {OrderId} processed for {CustomerId}", orderId, customerId);
 
-// ? Avoid - string interpolation loses structure
+// Avoid � string interpolation loses structure
 Logger.Log.Information($"Order {orderId} processed for {customerId}");
 ```
 
@@ -1052,21 +1064,21 @@ catch (Exception ex)
 ### 5. Log Objects with @ Destructuring
 
 ```csharp
-// ? Serializes the entire object with all properties
+// Serializes the entire object with all properties
 Logger.Log.Information("Processing {@Order}", order);
 
-// ?? Only logs ToString() result
+// Only logs ToString() result
 Logger.Log.Information("Processing {Order}", order);
 ```
 
 ### 6. Use CorrelationIdMessageHandler for HTTP Clients
 
 ```csharp
-// ? Automatic correlation ID propagation
+// Automatic correlation ID propagation
 builder.Services.AddHttpClient("MyApi")
     .AddHttpMessageHandler<CorrelationIdMessageHandler>();
 
-// ? Manual propagation is error-prone
+// Manual propagation is easier to get wrong
 client.DefaultRequestHeaders.Add("X-Correlation-Id", Logger.CorrelationId.ToString());
 ```
 
@@ -1076,8 +1088,8 @@ client.DefaultRequestHeaders.Add("X-Correlation-Id", Logger.CorrelationId.ToStri
 
 ### Logs Not Being Written
 
-1. Verify `LoggerSettings` exists in `appsettings.json` (or `ApplicationName` as a fallback)
-2. Check that the `Name` property is set (required)
+1. Verify `LoggerSettings` exists in `appsettings.json` (or root `ApplicationName` as a fallback when `LoggerSettings` is absent)
+2. Ensure you have either a non-empty `LoggerSettings.Name` or a valid `ApplicationName` when `Name` is empty or the section is missing
 3. Ensure the `Path` directory exists and is writable
 4. Verify the application has file system permissions
 5. Check that `Logger.CloseAndFlush()` is being called on shutdown
@@ -1101,11 +1113,11 @@ Console output is only enabled in DEBUG builds (`#if DEBUG`). For release builds
 
 ### Configuration Not Loading
 
-1. Ensure `appsettings.json` is in the application's base directory
+1. Ensure `appsettings.json` is available where the library looks for it: the static `Logger` resolves the file under `AppContext.BaseDirectory` (with a narrow special case for certain system-hosted paths), while `AddLogging` / `UseLogging` read `TargetedVoyagerInstance` and `TargetedVoyagerEnvironment` via `File.OpenRead("appsettings.json")` (process **current directory**). Keep the working directory aligned with your published content, or ensure both paths see the same file.
 2. Check that the file is valid JSON
 3. Verify required root properties exist: `TargetedVoyagerInstance` and `TargetedVoyagerEnvironment`
 4. Verify either `LoggerSettings.Name` or `ApplicationName` is configured
-5. Check for case sensitivity issues (properties are case-insensitive)
+5. Property names are matched case-insensitively when deserializing `LoggerSettings`
 
 ### "TargetedVoyagerInstance" or "TargetedVoyagerEnvironment" Error
 
@@ -1139,21 +1151,21 @@ This package depends on the following NuGet packages:
 | Serilog.Sinks.Async | 2.1.0+ | Asynchronous log writing |
 | Serilog.Sinks.Console | 6.1.1+ | Console output (DEBUG builds) |
 | Serilog.Sinks.File | 7.0.0+ | File output with rolling |
-| Swashbuckle.AspNetCore | 10.1.5+ | Swagger/OpenAPI integration |
-| Swashbuckle.AspNetCore.SwaggerGen | 10.1.5+ | Swagger generation |
+| Swashbuckle.AspNetCore | 10.1.7 | Swagger/OpenAPI integration |
+| Swashbuckle.AspNetCore.SwaggerGen | 10.1.7 | Swagger generation |
 | System.Configuration.ConfigurationManager | 10.0.5+ | Configuration error handling |
 
 ---
 
 ## Version History
 
-- **10.1.4** - Current version targeting .NET 10
+- **10.1.6** � Current package version; targets **.NET 10** (`net10.0`). Confirm the version in `Corp.Lib.Logging.csproj` when upgrading.
 
 ---
 
 ## License
 
-Copyright © 2026 Sedgwick. All rights reserved.
+Copyright � 2026 Sedgwick. All rights reserved.
 
 ---
 
